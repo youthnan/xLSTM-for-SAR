@@ -1,0 +1,24 @@
+# MATLAB data files
+*.mat
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# PyTorch model weights (large binary files)
+*.pt
+
+# IDE
+.vscode/
+
+# Logs
+*.log
+
+# Accidental zero-byte artifact files
+--*
+echo
+rcm

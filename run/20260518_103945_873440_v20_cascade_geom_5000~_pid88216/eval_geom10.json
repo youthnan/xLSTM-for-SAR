@@ -1,0 +1,20 @@
+{
+  "checkpoint": "/root/xLSTM/run/20260518_103945_873440_v20_cascade_geom_5000_pid88216/weights/best.pt",
+  "mat_path": "/root/xLSTM/gene4/dataset1/PPTR_TrainDataset_v4_geom_10.mat",
+  "device": "cuda",
+  "model_arch": "cascade",
+  "num_samples": 10,
+  "batch_size": 4,
+  "seq_len": 2048,
+  "loss_total_mean_batch": 1.8649425109227498,
+  "loss_mse_norm_mean_batch": 0.645173450311025,
+  "loss_mse_phys_mean_batch": 0.0009268254895384113,
+  "loss_smooth_mean_batch": 1.5505823284911457e-05,
+  "loss_rcm_mean_batch": 0.0306856632232666,
+  "lambda_rcm_used": 1.0,
+  "position_rmse_after_correction": 0.05344440435469678,
+  "rmse_total": 0.05344440435469678,
+  "rmse_coarse": 0.05330702586442407,
+  "p_fix_export": null,
+  "note": "loss_* 为各 batch 标量 loss 再对 batch 取均值；mse_norm 是网络输出空间的损失，mse_phys 是反归一化回米制的位移误差；position_rmse = sqrt(mean_{b,t} ||p_fixed-p_true||^2)。"
+}

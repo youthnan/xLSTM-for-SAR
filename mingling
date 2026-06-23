@@ -1,0 +1,142 @@
+1) 主训练命令（推荐先跑这个）
+
+cd /root/xLSTM
+python train_pi_xlstm.py \
+  --mat_path PPTR_TrainDataset_1000.mat \
+  --batch_size 4 \
+  --epochs 100 \
+  --lr 1e-3 \
+  --hidden_dim 64 \
+  --num_blocks 2 \
+  --num_heads 4 \
+  --weight_decay 1e-4 \
+  --lambda_smooth 0.1 \
+  --lambda_rcm_max 0.5 \
+  --rcm_warmup_start 20 \
+  --rcm_warmup_end 50 \
+  --scheduler_step_size 20 \
+  --scheduler_gamma 0.5 \
+  --checkpoint_every 10 \
+  --param_report_every 10 \
+  --run_name v1
+
+  2) 后台运行（推荐，免得 SSH 断了训练就挂）
+cd /root/xLSTM
+nohup python -u train_pi_xlstm.py \
+  --mat_path PPTR_TrainDataset_1000.mat \
+  --batch_size 4 --epochs 100 --lr 1e-3 \
+  --rcm_warmup_start 20 --rcm_warmup_end 50 --lambda_rcm_max 0.5 \
+  --checkpoint_every 10 --run_name v1 \
+  > run/v1.log 2>&1 &
+echo "pid=$!"
+tail -f run/v1.log
+
+
+3) 烟雾自检（先跑这个 5 分钟内确认环境通畅）
+cd /root/xLSTM
+python train_pi_xlstm.py \
+  --mat_path PPTR_TrainDataset_50.mat \
+  --batch_size 2 --epochs 3 --hidden_dim 32 \
+  --rcm_warmup_start 1 --rcm_warmup_end 2 \
+  --checkpoint_every 1 --run_name smoke
+
+
+  5) 训练完后做评估
+cd /root/xLSTM
+LATEST=$(ls -td run/*v1* | head -1)/weights/latest.pt
+echo "checkpoint: $LATEST"
+python eval_pi_xlstm.py \
+  --checkpoint "$LATEST" \
+  --mat_path PPTR_TrainDataset_1000.mat \
+  --batch_size 4 \
+  --json_out eval_v1.json
+
+  python eval_pi_xlstm.py \
+  --checkpoint "$LATEST" \
+  --mat_path PPTR_TrainDataset_1000.mat \
+  --batch_size 4 \
+  --save_p_fix run/v1_p_fix.mat \
+  --also_save_delta
+
+
+cd /root/xLSTM
+LATEST=/root/xLSTM/run/20260510_230302_161622_v6_pid56957/weights/latest.pt
+echo "checkpoint: $LATEST"
+
+# 用训练集(50样本)评估，输出指标 JSON
+python eval_pi_xlstm.py \
+  --checkpoint "$LATEST" \
+  --mat_path PPTR_TrainDataset_1000.mat \
+  --batch_size 4 \
+  --json_out eval_v8.json
+
+
+cd /root/xLSTM
+LATEST=/root/xLSTM/run/20260512_214807_563130_v13_stride2_pid22714/weights/best.pt
+echo "checkpoint: $LATEST"
+# 用大数据集(1000样本)评估，同时保存 P_fix 和 delta
+python eval_pi_xlstm.py \
+  --checkpoint "$LATEST" \
+  --mat_path /root/xLSTM/dataset3/PPTR_TrainDataset_10.mat \
+  --batch_size 4 \
+  --save_p_fix /root/xLSTM/run/20260512_214807_563130_v13_stride2_pid22714/test/v1_p_fix.mat \
+  --also_save_delta
+
+cd /root/xLSTM
+torchrun --standalone --nproc_per_node=2 train_pi_xlstm.py \
+  --mat_path /root/xLSTM/dataset/PPTR_TrainDataset_5000.mat \
+  --batch_size 16 \
+  --epochs 200 \
+  --lr 1e-3 \
+  --hidden_dim 128 \
+  --num_blocks 4 \
+  --num_heads 4 \
+  --weight_decay 1e-4 \
+  --lambda_smooth 5.0 \
+  --lambda_rcm_max 1.0 \
+  --rcm_warmup_start 10 \
+  --rcm_warmup_end 50 \
+  --scheduler_t0 20 \
+  --scheduler_t_mult 2 \
+  --scheduler_eta_min 1e-5 \
+  --val_ratio 0.1 \
+  --checkpoint_every 10 \
+  --param_report_every 10 \
+  --run_name v8_5k_ddp
+
+
+# ── v20 cascade geom 测试 / 评估 ─────────────────────────────────────
+
+cd /root/xLSTM
+LATEST=/root/xLSTM/run/20260518_104331_912254_v20_cascade_geom_5000~_pid90519/weights/best.pt
+echo "checkpoint: $LATEST"
+# 用训练集(5000样本)评估，输出指标 JSON
+python eval_pi_xlstm.py \
+  --checkpoint "$LATEST" \
+  --mat_path /root/xLSTM/gene4/dataset1/PPTR_TrainDataset_v4_geom_5000.mat \
+  --batch_size 8 \
+  --json_out /root/xLSTM/run/20260518_104331_912254_v20_cascade_geom_5000~_pid90519/eval_best.json
+
+cd /root/xLSTM
+LATEST=/root/xLSTM/run/20260518_104331_912254_v20_cascade_geom_5000~_pid90519/weights/best.pt
+echo "checkpoint: $LATEST"
+# 用训练集(5000样本)评估，同时保存 P_fix 和 delta
+python eval_pi_xlstm.py \
+  --checkpoint "$LATEST" \
+  --mat_path /root/xLSTM/gene4/dataset1/PPTR_TrainDataset_v4_geom_5000.mat \
+  --batch_size 8 \
+  --save_p_fix /root/xLSTM/run/20260518_104331_912254_v20_cascade_geom_5000~_pid90519/test/p_fix_best.mat \
+  --also_save_delta
+
+cd /root/xLSTM
+LATEST=/root/xLSTM/run/20260518_103945_873440_v20_cascade_geom_5000_pid88216/weights/best.pt
+RUN=/root/xLSTM/run/20260518_103945_873440_v20_cascade_geom_5000_pid88216
+echo "checkpoint: $LATEST"
+# 小数据集(10样本)评估 + JSON + 导出 P_fix / delta
+python eval_pi_xlstm.py \
+  --checkpoint "$LATEST" \
+  --mat_path /root/xLSTM/gene4/dataset1/PPTR_TrainDataset_v4_geom_10.mat \
+  --batch_size 4 \
+  --json_out "$RUN/eval_geom10.json" \
+  --save_p_fix "$RUN/test/p_fix_geom10.mat" \
+  --also_save_delta

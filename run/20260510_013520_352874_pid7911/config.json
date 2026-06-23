@@ -1,0 +1,43 @@
+{
+  "run_dir": "/root/xLSTM/run/20260510_013520_352874_pid7911",
+  "started_at_utc": "2026-05-09T17:35:20.353111+00:00",
+  "device": "cuda",
+  "seq_len_from_mat": 4096,
+  "resume_from": null,
+  "args": {
+    "mat_path": "/root/xLSTM/PPTR_TrainDataset_50.mat",
+    "batch_size": 4,
+    "epochs": 50,
+    "lr": 0.0005,
+    "hidden_dim": 64,
+    "run_root": "/root/xLSTM/run",
+    "run_name": "",
+    "checkpoint_dir": "",
+    "resume": "",
+    "checkpoint_every": 50,
+    "param_report_every": 10,
+    "num_blocks": 2,
+    "num_heads": 4,
+    "scheduler_step_size": 10,
+    "scheduler_gamma": 0.5,
+    "weight_decay": 0.0001,
+    "lambda_smooth": 0.1,
+    "lambda_rcm": 0.5
+  },
+  "train_meta": {
+    "mat_path": "/root/xLSTM/PPTR_TrainDataset_50.mat",
+    "seq_len": 4096,
+    "hidden_dim": 64,
+    "batch_size": 4,
+    "epochs": 50,
+    "lr": 0.0005,
+    "weight_decay": 0.0001,
+    "slstm_backend": "cuda",
+    "num_blocks": 2,
+    "num_heads": 4,
+    "lambda_smooth": 0.1,
+    "lambda_rcm": 0.5,
+    "scheduler_step_size": 10,
+    "scheduler_gamma": 0.5
+  }
+}

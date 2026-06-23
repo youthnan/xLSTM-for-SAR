@@ -1,0 +1,17 @@
+{
+  "checkpoint": "/root/xLSTM/run/20260510_222144_863917_v4_pid45349/weights/latest.pt",
+  "mat_path": "/root/xLSTM/PPTR_TrainDataset_50.mat",
+  "device": "cuda",
+  "num_samples": 50,
+  "batch_size": 4,
+  "seq_len": 4096,
+  "loss_total_mean_batch": 0.012615646235644817,
+  "loss_mse_norm_mean_batch": 0.012600449988475213,
+  "loss_mse_phys_mean_batch": 1.3581560508030705e-06,
+  "loss_smooth_mean_batch": 1.3195423557240597e-06,
+  "loss_rcm_mean_batch": 8.598514586293068e-06,
+  "lambda_rcm_used": 1.0,
+  "position_rmse_after_correction": 0.0020315914070596977,
+  "p_fix_export": null,
+  "note": "loss_* 为各 batch 标量 loss 再对 batch 取均值；mse_norm 是网络输出空间的损失，mse_phys 是反归一化回米制的位移误差；position_rmse = sqrt(mean_{b,t} ||p_fixed-p_true||^2)。"
+}

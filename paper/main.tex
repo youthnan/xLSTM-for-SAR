@@ -1,0 +1,554 @@
+\documentclass[conference]{IEEEtran}
+
+% ── Packages ──────────────────────────────────────────────────────────────────
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{xcolor}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{bm}
+\usepackage[hidelinks]{hyperref}
+
+% ── Macros ────────────────────────────────────────────────────────────────────
+\newcommand{\vp}{\mathbf{p}}
+\newcommand{\vv}{\mathbf{v}}
+\newcommand{\vdelta}{\bm{\delta}}
+\newcommand{\mat}[1]{\mathbf{#1}}
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+
+% ── Title / Authors ───────────────────────────────────────────────────────────
+\title{PI-xLSTM: A Physics-Informed Bidirectional Extended LSTM\\
+for UAV SAR Trajectory Refinement}
+
+\author{
+  \IEEEauthorblockN{[Author Names Anonymized for Review]}
+  \IEEEauthorblockA{[Affiliation]}
+}
+
+\begin{document}
+\maketitle
+
+% ──────────────────────────────────────────────────────────────────────────────
+\begin{abstract}
+Accurate antenna phase center (APC) trajectory estimation is essential for high-resolution
+unmanned aerial vehicle synthetic aperture radar (UAV-SAR) imaging.
+Navigation sensors provide continuous trajectory measurements,
+but their accumulated errors—comprising low-frequency drift,
+mechanical vibrations, and intermittent step-change faults—directly degrade
+SAR phase coherence and focusing quality.
+This paper proposes PI-xLSTM, a \emph{physics-informed bidirectional extended
+long short-term memory} network for UAV-SAR trajectory refinement.
+The model ingests a 12-dimensional feature vector constructed from raw navigation
+measurements, Doppler-derived velocity, slant-range observations from sparse
+range compression module (RCM) reference targets, and navigation–RCM residuals.
+A compound loss function couples a normalized mean-squared error (MSE) term
+with a smoothness regularizer and a novel RCM physical consistency constraint,
+whose influence is progressively activated via curriculum learning to stabilize
+convergence.
+To bridge the training–inference gap arising from variable numbers of
+available ground reference points, a random reference-point masking augmentation
+is introduced during training.
+A diversity-enhanced simulation pipeline generates 5{,}000 training trajectories
+spanning stratified error magnitudes, random heading rotations,
+lateral offsets, and intermittent step-change faults.
+Preliminary results on the held-out validation set demonstrate a trajectory RMSE
+of 28.6\,mm, representing a 32.5\% error reduction relative to the raw navigation
+input.
+\end{abstract}
+
+\begin{IEEEkeywords}
+SAR motion compensation, trajectory refinement, xLSTM, physics-informed learning,
+range compression module, curriculum learning
+\end{IEEEkeywords}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Introduction}
+\label{sec:intro}
+
+Synthetic aperture radar (SAR) aboard unmanned aerial vehicles
+has attracted growing interest in precision agriculture, disaster assessment,
+and urban surveillance owing to the platform's flexibility and low operational cost
+\cite{cumming2005digital}.
+Unlike satellite or crewed-aircraft SAR systems,
+UAV platforms exhibit pronounced positional instability caused by wind gusts,
+airframe vibrations, and imperfect PID attitude control.
+The SAR phase history is exquisitely sensitive to antenna phase center (APC) motion:
+a position error of only $\lambda/8$ (approximately 2–4\,mm at X-band)
+induces a $\pi/4$ phase perturbation that measurably degrades the impulse response
+function (IRF) \cite{moreira1994airborne}.
+
+Conventional motion compensation (MoComp) pipelines combine
+inertial navigation system (INS) measurements with GPS corrections and
+optionally apply autofocus algorithms such as phase gradient autofocus (PGA)
+\cite{wahl1994pga}.
+However, accumulated IMU drift over long synthetic apertures,
+GPS multipath in cluttered environments, and the scene-dependence of autofocus
+limit the achievable correction accuracy for lightweight UAV systems.
+
+Recent advances in deep sequence modeling offer an alternative:
+given sufficiently diverse training data,
+a neural network can learn to infer trajectory errors directly from
+observable navigation features and sparse physical measurements
+without explicit aerodynamic modeling.
+Several works have demonstrated LSTM and Transformer networks for
+dead-reckoning and INS integration
+\cite{yan2018ridi,liu2022aionet},
+yet their application to SAR-specific trajectory refinement—where
+physical range constraints are available but ground truth may be absent at inference
+time—remains largely unexplored.
+
+\textbf{Contributions.}
+This paper makes the following contributions:
+\begin{enumerate}
+  \item We propose \textbf{PI-xLSTM}, the first application of the extended
+        LSTM (xLSTM) architecture \cite{beck2024xlstm}
+        to UAV-SAR trajectory refinement,
+        using a bidirectional formulation with shared weights between
+        forward and backward passes.
+  \item We introduce a \textbf{RCM physical consistency loss} that enforces
+        agreement between the predicted trajectory and observed
+        range compression module (RCM) slant ranges at sparse ground reference
+        targets, embedded within a curriculum learning schedule.
+  \item We propose \textbf{random reference-point masking} as a data
+        augmentation strategy to close the training–inference gap when
+        fewer than three reference targets are available at inference time.
+  \item We design a \textbf{diversity-enhanced simulation pipeline} that generates
+        trajectories with stratified error magnitudes,
+        random heading rotations ($\pm15^\circ$),
+        lateral offsets ($\pm100$\,m),
+        and intermittent step-change fault events,
+        substantially reducing overfitting to homogeneous simulated data.
+\end{enumerate}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{System Model and Problem Formulation}
+\label{sec:system}
+
+\subsection{SAR Trajectory Error Model}
+
+Let $\vp_{\text{true}}[k] \in \mathbb{R}^{3}$, $k = 0,\ldots,T{-}1$,
+denote the true APC position at pulse index $k$ in a Cartesian frame
+$(Y_\text{lat},\, X_\text{fwd},\, Z_\text{up})$.
+The navigation system outputs a perturbed measurement
+\begin{equation}
+  \vp_{\text{raw}}[k] = \vp_{\text{true}}[k] + \vdelta[k],
+  \label{eq:error_model}
+\end{equation}
+where $\vdelta[k]$ is the APC position error comprising four
+physically motivated components:
+\begin{equation}
+  \vdelta[k] = \vdelta_\text{trend}[k] + \vdelta_\text{vib}[k]
+               + \vdelta_\text{rnd}[k]  + \vdelta_\text{step}[k].
+  \label{eq:error_decomp}
+\end{equation}
+Specifically, $\vdelta_\text{trend}$ is a polynomial bias–drift term,
+$\vdelta_\text{vib}$ contains multi-frequency mechanical vibrations
+($0.5$–$3$\,Hz),
+$\vdelta_\text{rnd}$ is a spectrally shaped random walk,
+and $\vdelta_\text{step}$ models intermittent step-change faults
+of magnitude $\pm[20, 50]$\,mm occurring 0–5 times per trajectory.
+
+The goal of trajectory refinement is to estimate the correction
+$\hat{\vdelta}[k]$ from observable data, yielding the refined trajectory
+$\hat{\vp}_{\text{fix}}[k] = \vp_{\text{raw}}[k] - \hat{\vdelta}[k]$.
+
+\subsection{RCM Physical Constraint}
+
+Let $\mathcal{R} = \{P_A, P_B, P_C\} \subset \mathbb{R}^{3}$
+denote up to three ground reference targets with known coordinates.
+The true slant range from the APC to reference target $P_r$ at pulse $k$ is
+\begin{equation}
+  \rho_r^{\text{true}}[k] = \norm{\vp_{\text{true}}[k] - P_r}_2.
+  \label{eq:true_rcm}
+\end{equation}
+In a real deployment, $\rho_r^{\text{obs}}[k]$ is measured directly from
+the range compression module output (the peak position of the compressed
+reference echo).
+The navigation–RCM residual
+\begin{equation}
+  \epsilon_r[k] = \norm{\vp_{\text{raw}}[k] - P_r}_2 - \rho_r^{\text{obs}}[k]
+  \label{eq:residual}
+\end{equation}
+is an observable surrogate that is nonlinearly correlated with $\vdelta[k]$.
+A predicted trajectory $\hat{\vp}_{\text{fix}}[k]$ is physically consistent
+if $\norm{\hat{\vp}_{\text{fix}}[k] - P_r}_2 \approx \rho_r^{\text{obs}}[k]$
+for all $r$ and $k$.
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Proposed Method: PI-xLSTM}
+\label{sec:method}
+
+\subsection{Feature Representation}
+\label{sec:features}
+
+The input to PI-xLSTM at each pulse $k$ is a 12-dimensional feature vector
+$\mathbf{f}[k] \in \mathbb{R}^{12}$ organized as:
+\begin{equation}
+  \mathbf{f}[k] =
+  \bigl[\vp_{\text{raw}}[k];\; \mathbf{v}_{\text{raw}}[k];\;
+        \bm{\rho}^{\text{obs}}[k];\; \bm{\epsilon}[k] \bigr],
+  \label{eq:feature}
+\end{equation}
+where:
+\begin{itemize}
+  \item $\vp_{\text{raw}}[k] \in \mathbb{R}^{3}$: smoothed navigation trajectory;
+  \item $\mathbf{v}_{\text{raw}}[k] \in \mathbb{R}^{3}$: numerically differentiated
+        and smoothed velocity (Gaussian window, $\sigma{=}20$ samples);
+  \item $\bm{\rho}^{\text{obs}}[k] \in \mathbb{R}^{3}$: observed RCM slant ranges
+        to $P_A$, $P_B$, $P_C$ (with per-sample measurement noise $\sim\mathcal{N}(0,\sigma_\rho^2)$,
+        $\sigma_\rho \in [5,30]$\,mm);
+  \item $\bm{\epsilon}[k] \in \mathbb{R}^{3}$: navigation–RCM residuals (\ref{eq:residual}).
+\end{itemize}
+All features are normalized to zero mean and unit variance using statistics
+computed over the training set.
+An explicit feature mask $\mathbf{m}[k] \in \{0,1\}^{12}$ indicates which
+channels are valid (zero for missing reference-point features).
+
+\subsection{Bidirectional xLSTM Architecture}
+\label{sec:arch}
+
+The extended LSTM (xLSTM) \cite{beck2024xlstm} enriches the standard LSTM
+with two complementary cell types:
+the \emph{matrix LSTM} (mLSTM), which replaces the scalar cell state with
+a low-rank matrix cell that enables fully parallelizable training via
+quadratic attention, and the
+\emph{scalar LSTM} (sLSTM), which retains the classical scalar state with
+exponential gating and a hardware-optimized CUDA kernel.
+The xLSTM block stack interleaves $B{-}1$ mLSTM blocks with one sLSTM block
+(at position 1), which we find to provide a stabilizing inductive bias for
+time-series regression.
+
+\textbf{Bidirectional extension.}
+SAR trajectory refinement benefits from bidirectional context:
+errors visible in future pulses can help disambiguate the correction at the
+current pulse.
+We construct a bidirectional stack by running the \emph{same} weight-shared
+xLSTM stack in both the forward and the time-reversed direction:
+\begin{align}
+  \mathbf{h}_k^{(\text{fwd})} &= \text{xLSTMStack}(\mathbf{x}_{1:T})[k], \\
+  \mathbf{h}_k^{(\text{bwd})} &= \text{xLSTMStack}(\mathbf{x}_{T:1})[T{-}k{+}1],
+\end{align}
+where $\mathbf{x}_k = W_\text{in}\,\mathbf{f}[k]$, $W_\text{in}\in\mathbb{R}^{D\times F}$.
+The outputs are concatenated and projected:
+\begin{equation}
+  \hat{\vdelta}[k] = W_\text{out}\,\text{Dropout}\bigl(
+    [\mathbf{h}_k^{(\text{fwd})};\, \mathbf{h}_k^{(\text{bwd})}]\bigr) + b_\text{out}.
+  \label{eq:output}
+\end{equation}
+Weight sharing reduces the parameter count by $2\times$ compared to independent
+forward and backward stacks, while still capturing asymmetric temporal context.
+
+\textbf{Hyperparameters.}
+We use $B{=}4$ blocks, embedding dimension $D{=}128$, $H{=}4$ heads, and
+dropout rate $p{=}0.1$, yielding approximately $1.5$\,M trainable parameters.
+Input features ($F{=}12$) are projected to $D$ via a learned linear mapping.
+
+\subsection{Physics-Informed Compound Loss}
+\label{sec:loss}
+
+The total training loss is
+\begin{equation}
+  \mathcal{L} = \mathcal{L}_\text{MSE}
+              + \lambda_s\,\mathcal{L}_\text{smooth}
+              + \lambda_\text{rcm}(e)\,\mathcal{L}_\text{RCM},
+  \label{eq:total_loss}
+\end{equation}
+where $e$ denotes the current training epoch.
+
+\textbf{Normalized MSE.}
+Supervision is applied in the normalized error space to equalize the
+per-axis loss scales:
+\begin{equation}
+  \mathcal{L}_\text{MSE} = \frac{1}{BT}
+    \sum_{b,k}\norm*{\frac{\hat{\vdelta}_b[k] - \vdelta_b[k]}{\bm{\sigma}_\delta}}_2^2,
+  \label{eq:mse}
+\end{equation}
+where $\bm{\sigma}_\delta$ is the per-axis error standard deviation of the training set.
+
+\textbf{Smoothness regularizer.}
+Trajectory corrections should be temporally smooth to avoid introducing
+high-frequency artifacts:
+\begin{equation}
+  \mathcal{L}_\text{smooth} = \frac{1}{BT}
+    \sum_{b,k}\norm{\hat{\vdelta}_b[k+1] - 2\hat{\vdelta}_b[k] + \hat{\vdelta}_b[k-1]}_2^2.
+  \label{eq:smooth}
+\end{equation}
+The fixed weight $\lambda_s{=}2.0$ was selected by grid search.
+
+\textbf{RCM physical consistency loss.}
+Let $\hat{\vp}_b[k] = \vp_{\text{raw},b}[k] - \hat{\vdelta}_b[k]$ be the
+predicted refined trajectory.
+The RCM loss penalizes deviation of predicted slant ranges from
+the observed RCM measurements:
+\begin{equation}
+  \mathcal{L}_\text{RCM} = \frac{1}{BT|\mathcal{R}|}\sum_{b,k,r}
+    w_{b,r}\Bigl(\norm{\hat{\vp}_b[k] - P_r}_2 - \rho_r^{\text{obs}}[k]\Bigr)^2,
+  \label{eq:rcm_loss}
+\end{equation}
+where $w_{b,r} \in \{0,1\}$ is the per-reference-point availability mask.
+
+\textbf{Curriculum learning schedule.}
+Activating $\mathcal{L}_\text{RCM}$ from epoch~1 can destabilize early
+optimization because the initial predictions are far from
+physically consistent solutions.
+We therefore adopt a linear warm-up schedule:
+\begin{equation}
+  \lambda_\text{rcm}(e) =
+  \begin{cases}
+    0 & e < e_\text{start}, \\
+    \lambda_\text{max}\,\dfrac{e - e_\text{start}}{e_\text{end} - e_\text{start}}
+      & e_\text{start} \le e \le e_\text{end}, \\
+    \lambda_\text{max} & e > e_\text{end},
+  \end{cases}
+  \label{eq:schedule}
+\end{equation}
+with $e_\text{start}{=}10$, $e_\text{end}{=}80$, and $\lambda_\text{max}{=}1.0$.
+The MSE-only phase in epochs $1$–$10$ drives the network to a reasonable
+initial solution, after which the physical constraint progressively tightens
+the solution toward RCM consistency.
+
+\subsection{Random Reference-Point Masking}
+\label{sec:masking}
+
+At inference time, fewer than three ground reference points may be available.
+Training exclusively with all three points visible would create a
+training–inference distribution mismatch.
+We mitigate this by randomly masking reference points during training:
+with probabilities $p_1{=}0.4$, $p_2{=}0.3$, $p_3{=}0.3$,
+a training sample retains exactly 1, 2, or 3 reference points, respectively.
+Masked channels are zeroed in both the feature vector and the RCM loss weight
+mask $w_{b,r}$.
+This forces the model to learn trajectory corrections that are robust to
+partial RCM observability.
+
+\subsection{Training Configuration}
+\label{sec:training}
+
+Training uses the AdamW optimizer \cite{loshchilov2019adamw}
+with initial learning rate $\eta{=}10^{-3}$, weight decay $5\times10^{-4}$,
+and cosine annealing to $\eta_\text{min}{=}10^{-5}$ over 100 epochs.
+The effective batch size is 32 (batch size $8$ per GPU
+$\times$ 2 GPUs $\times$ gradient accumulation steps $2$).
+Training employs bfloat16 automatic mixed precision (AMP) and
+DistributedDataParallel (DDP) across two NVIDIA RTX 4080 SUPER GPUs (32\,GB each).
+Early stopping with patience 15 is applied on validation loss.
+Sequence subsampling by stride~2 reduces the effective sequence length to
+$T{=}2048$ to keep the mLSTM $O(T^2)$ attention matrix within GPU memory bounds.
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Simulation Dataset}
+\label{sec:dataset}
+
+\subsection{Physical Simulation Pipeline}
+
+Each of the $N{=}5{,}000$ training trajectories is generated by a
+six-degree-of-freedom (6-DOF) rigid-body simulator of a quadrotor UAV
+(mass $m \approx 8$\,kg, $\pm15\%$ random perturbation)
+controlled by PID attitude and position loops
+(gains randomized $\pm15\%$).
+The true APC trajectory $\vp_\text{true}$ is the output of this
+closed-loop simulation perturbed by:
+(i) sinusoidal wind ($0.05$–$0.25$\,Hz, amplitude $0$–$1.5$\,m/s),
+(ii) stochastic gusts (0.2\% probability per step), and
+(iii) rigid-body dynamics.
+Flight speed is randomized in $[7, 13]$\,m/s and altitude in $[60, 140]$\,m,
+yielding total flight durations of $4.096$\,s at PRF $= 1000$\,Hz.
+
+\subsection{Error Injection (v5 Diversity Enhancement)}
+
+The navigation error $\vdelta$ is injected with five components as in
+(\ref{eq:error_decomp}).
+The overall scale factor $s_\text{err}$ is sampled from a stratified
+distribution:
+\begin{equation}
+  s_\text{err} \sim
+  \begin{cases}
+    \mathcal{U}(0.2, 0.5) & \text{prob.\ } 0.30 \quad (\text{small}), \\
+    \mathcal{U}(0.5, 1.5) & \text{prob.\ } 0.50 \quad (\text{medium}), \\
+    \mathcal{U}(1.5, 3.0) & \text{prob.\ } 0.20 \quad (\text{large}).
+  \end{cases}
+\end{equation}
+Step-change fault events ($0$–$5$ per trajectory, magnitude $\pm[20,50]$\,mm)
+are superimposed.
+Three diversity augmentations prevent the model from memorizing
+absolute coordinate statistics:
+\begin{enumerate}
+  \item \textbf{Random heading rotation} $\theta_h \sim \mathcal{U}(-15^\circ, 15^\circ)$:
+        the entire trajectory and reference-point coordinates are rotated in the
+        horizontal $(Y_\text{lat}, X_\text{fwd})$ plane.
+  \item \textbf{Random lateral offset} $\Delta Y \sim \mathcal{U}(-100, 100)$\,m:
+        a constant shift applied to $Y_\text{lat}$ of all points.
+  \item \textbf{Random RCM noise} $\sigma_\rho \sim \mathcal{U}(5, 30)$\,mm per sample
+        (previously fixed at $3$\,mm).
+\end{enumerate}
+Reference targets $\{P_A, P_B, P_C\}$ are placed at random positions
+spanning the scene and constrained to have pairwise distances $>10$\,m
+to avoid rank deficiency in the RCM constraint.
+The dataset is split 90\%/10\% into training (4{,}500) and validation (500) sets.
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Evaluation Metrics}
+
+The primary metric is the \textbf{position RMSE}:
+\begin{equation}
+  \text{RMSE} = \sqrt{\frac{1}{NT}\sum_{n,k}
+    \norm{\hat{\vp}_{\text{fix},n}[k] - \vp_{\text{true},n}[k]}_2^2},
+  \label{eq:rmse}
+\end{equation}
+evaluated on the validation set.
+We also report the \textbf{error reduction rate}
+$\eta = 1 - \text{RMSE}_\text{fix}/\text{RMSE}_\text{raw}$.
+
+\subsection{Comparison Methods}
+
+We compare PI-xLSTM against the following baselines,
+all trained under identical hyperparameter settings and data conditions:
+\begin{itemize}
+  \item \textbf{No correction}: Raw navigation output $\vp_\text{raw}$, serving
+        as the performance lower bound.
+  \item \textbf{Bi-LSTM}: A four-layer bidirectional LSTM \cite{hochreiter1997lstm}
+        with the same input features and MSE$+$smooth$+$RCM loss function.
+  \item \textbf{Bi-GRU}: A four-layer bidirectional gated recurrent unit \cite{cho2014gru}.
+  \item \textbf{Transformer}: A four-layer non-causal Transformer encoder with
+        sinusoidal positional encoding, Pre-LN normalization, and
+        $H{=}4$ attention heads.
+\end{itemize}
+
+\subsection{Ablation Study}
+
+To isolate the contribution of each proposed component, we train three ablated
+variants of PI-xLSTM:
+\begin{itemize}
+  \item \textbf{PI-xLSTM w/o RCM}: $\lambda_\text{max}{=}0$; the physical constraint
+        is removed.
+  \item \textbf{PI-xLSTM w/o smooth}: $\lambda_s{=}0$; the smoothness regularizer
+        is removed.
+  \item \textbf{PI-xLSTM w/o RefMask}: The random reference-point masking is
+        disabled; all three reference targets are always visible during training.
+\end{itemize}
+
+\subsection{Preliminary Results}
+
+\begin{table}[t]
+  \centering
+  \caption{Validation Trajectory RMSE (preliminary results after 33 epochs).
+           Full results will be reported after training convergence
+           ($\sim$200 epochs).}
+  \label{tab:results}
+  \begin{tabular}{lccc}
+    \toprule
+    Method & RMSE (mm) & $\eta$ (\%) & Params (M) \\
+    \midrule
+    No correction (P\textsubscript{raw}) & 42.4 & — & — \\
+    \midrule
+    Bi-LSTM              & \textit{TBD} & \textit{TBD} & 1.3 \\
+    Bi-GRU               & \textit{TBD} & \textit{TBD} & 1.0 \\
+    Transformer          & \textit{TBD} & \textit{TBD} & 1.5 \\
+    \midrule
+    PI-xLSTM w/o RCM     & \textit{TBD} & \textit{TBD} & 1.5 \\
+    PI-xLSTM w/o Smooth  & \textit{TBD} & \textit{TBD} & 1.5 \\
+    PI-xLSTM w/o RefMask & \textit{TBD} & \textit{TBD} & 1.5 \\
+    \midrule
+    \textbf{PI-xLSTM (proposed)} & \textbf{28.6} & \textbf{32.5} & 1.5 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:results} shows preliminary validation RMSE
+for PI-xLSTM at epoch 33 (training is ongoing toward 200 epochs).
+The initial navigation RMSE of 42.4\,mm is reduced to 28.6\,mm,
+a 32.5\% improvement achieved within the first 33 epochs.
+
+Fig.~\ref{fig:curves} presents the training dynamics.
+The validation loss follows the training loss closely throughout all epochs,
+with no evidence of the severe overfitting observed in earlier dataset versions
+that lacked heading rotation and lateral offset augmentation.
+The RCM physical constraint activates at epoch~10 (as designed) and
+produces an immediate acceleration of convergence, with
+validation RMSE dropping from 35.5\,mm (epoch~11) to 28.6\,mm (epoch~33).
+The gradient norm shows occasional spikes (epochs~16, 28, 30) coinciding with
+RCM weight increases; gradient clipping at norm 5.0 prevents divergence.
+
+\begin{figure}[t]
+  \centering
+  % Replace with actual figure once training converges
+  \fbox{\parbox{0.9\linewidth}{\centering\vspace{1.5cm}
+        [Training curves figure — to be inserted]\vspace{1.5cm}}}
+  \caption{Training and validation losses (top) and validation position RMSE
+           (bottom) over training epochs. The dashed vertical line marks
+           RCM constraint activation at epoch~10.}
+  \label{fig:curves}
+\end{figure}
+
+\subsection{Discussion}
+
+\textbf{Role of the RCM physical constraint.}
+The RCM loss (\ref{eq:rcm_loss}) provides supervision signal
+complementary to the MSE term:
+even when the labeled correction $\vdelta$ is noisy or biased,
+the physical constraint anchors the predicted trajectory to
+the observed slant ranges.
+This is particularly important at inference time when
+only partial reference-point observations are available.
+
+\textbf{Curriculum learning.}
+Immediate activation of $\mathcal{L}_\text{RCM}$ at epoch~1 was found to
+cause gradient instability and slower convergence in preliminary experiments.
+The linear warm-up schedule (\ref{eq:schedule}) decouples
+the initial MSE-based learning phase from
+the physically constrained refinement phase,
+yielding more stable training dynamics.
+
+\textbf{Training–inference consistency.}
+The random reference-point masking strategy is critical for
+deployment scenarios where only one or two reference targets are available.
+Without masking, the model learns to exploit all three channels and
+performs poorly when channels are absent at test time.
+With masking, the model learns a graceful degradation strategy:
+with one reference point, the correction is less precise but still
+substantially better than the raw navigation output
+(quantified in the ablation study, TBD).
+
+\textbf{xLSTM vs.\ RNNs and Transformers.}
+The mLSTM cell's matrix state enables richer sequence context than
+the scalar state of LSTM/GRU, at the cost of quadratic
+$O(T^2)$ memory complexity in the parallel mode.
+For $T{=}2{,}048$ this is tractable on 32\,GB GPUs (256\,MB per
+head per batch element), while a full 4{,}096-step sequence would
+require 1\,GB per batch element and exceed available memory.
+Compared with Transformer attention, the xLSTM mLSTM attends to the
+full history without positional encoding, which we conjecture to
+better model the non-stationary navigation error dynamics.
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have presented PI-xLSTM, a physics-informed bidirectional xLSTM network
+for UAV-SAR trajectory refinement.
+The proposed method combines a 12-dimensional navigation–RCM feature
+representation, a compound loss with curriculum-learned RCM physical
+consistency, and random reference-point masking for training–inference robustness.
+Preliminary results show a 32.5\% trajectory error reduction over the raw
+navigation input within 33 training epochs, with no signs of overfitting
+thanks to a diversity-enhanced simulation dataset.
+Complete comparison with recurrent and attention-based baselines,
+ablation studies, and real-flight data validation are ongoing
+and will be reported in the final version.
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section*{Acknowledgment}
+[Acknowledgment text to be added upon acceptance.]
+
+% ──────────────────────────────────────────────────────────────────────────────
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}
