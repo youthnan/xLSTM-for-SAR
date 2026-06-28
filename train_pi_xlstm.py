@@ -1555,17 +1555,17 @@ def main() -> None:
         default="PPTR_Dataset/PPTR_TrainDataset_1000.mat",
         help="Path to v7.3 .mat with Feat_All, P_raw, P_true",
     )
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--grad_accum_steps", type=int, default=1,
                         help="梯度累积步数，effective_batch = batch_size * grad_accum_steps * world_size")
     parser.add_argument(
         "--epochs",
         type=int,
-        default=100,
+        default=200,
         help="总训练轮数。课程学习需要足够长的尾段让 RCM 充分发挥（默认 100）。",
     )
     parser.add_argument("--lr", type=float, default=5e-4)
-    parser.add_argument("--hidden_dim", type=int, default=64)
+    parser.add_argument("--hidden_dim", type=int, default=128)
     parser.add_argument(
         "--run_root",
         type=str,
@@ -1602,7 +1602,7 @@ def main() -> None:
         default=10,
         help="Print hyperparameter snapshot + ETA every N epochs",
     )
-    parser.add_argument("--num_blocks", type=int, default=2)
+    parser.add_argument("--num_blocks", type=int, default=4)
     parser.add_argument("--num_heads", type=int, default=4)
     parser.add_argument(
         "--dropout",
