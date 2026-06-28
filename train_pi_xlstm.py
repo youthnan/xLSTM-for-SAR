@@ -87,8 +87,11 @@ class SARDataset(Dataset):
     seq_stride > 1 时对时序维度做均匀下采样（每 seq_stride 点取一），
     用于将 T=4096 的数据集降为 T=2048，避免 mLSTM C 矩阵 O(S²) 显存爆炸。
 
-    旧 mat：__getitem__ 返回 9 元组。
-    v4_phase mat（Phase_rel / R_ref）：返回 11 元组。
+    R_obs 增强：当 .mat 包含 R_obs 字段时，自动将 Feat_All（6 维）扩展为
+    完整 12 维特征 [P_raw, V_raw, R_obs, ‖P_raw-Pos‖-R_obs]。
+
+    旧 mat（无 R_obs）：__getitem__ 返回 9 元组。
+    v4_phase mat（带 R_obs）：返回 11 元组（feat 12 维）。
     旧 v4 cascade mat（Delta_coarse / Phase_sin / Phase_cos）：返回 12 元组。
     """
 
@@ -129,6 +132,29 @@ class SARDataset(Dataset):
                 self.delta_coarse = None
                 self.phase_sin = None
                 self.phase_cos = None
+
+                # ── R_obs 加载 → 12 维特征组装 ────────────────────────────
+                self.has_rcm_obs = "R_obs" in f
+                if self.has_rcm_obs:
+                    rcm_obs = _h5_to_ntd(
+                        np.array(f["R_obs"]), feat_dims=(3,), name="R_obs"
+                    )  # [N, T, 3]
+                    # 将 Feat_All（6 维: P_raw + V_raw）扩展为 12 维
+                    N_orig, T_orig, F_orig = self.feat.shape
+                    full_feat = np.zeros((N_orig, T_orig, 12), dtype=np.float32)
+                    full_feat[:, :, 0:3] = self.feat[:, :, 0:3]  # P_raw
+                    full_feat[:, :, 3:6] = self.feat[:, :, 3:6]  # V_raw
+                    full_feat[:, :, 6:9] = rcm_obs               # R_obs
+                    # feat[9:12] = ‖P_raw - Pos‖ - R_obs（逐样本计算）
+                    p_raw_arr = self.p_raw  # [N, T, 3]
+                    for j, pos_arr in enumerate([self.pos_a, self.pos_b, self.pos_c]):
+                        d_nav = np.sqrt(np.sum(
+                            (p_raw_arr - pos_arr[:, None, :]) ** 2, axis=-1
+                        ))
+                        full_feat[:, :, 9 + j] = d_nav - rcm_obs[:, :, j]
+                    self.feat = full_feat
+                else:
+                    self.has_rcm_obs = False
             elif self.is_v4_legacy:
                 self.delta_coarse = _h5_to_ntd(
                     np.array(f["Delta_coarse"]), feat_dims=(3,), name="Delta_coarse"
@@ -156,6 +182,8 @@ class SARDataset(Dataset):
         T_eff = self.feat.shape[1] // self.seq_stride
         if self.is_v4_phase:
             v4_tag = " [v4_phase: Phase_rel+R_ref]"
+            if self.has_rcm_obs:
+                v4_tag += " [12-dim feat: P_raw+V_raw+R_obs+residual]"
         elif self.is_v4_legacy:
             v4_tag = " [v4_legacy: Delta_coarse+Phase_sin/cos]"
         else:
@@ -476,7 +504,7 @@ class RefPointMaskedDataset(Dataset):
 class DataNormalizer(nn.Module):
     """以 buffer 形式持有 feat 与 error 的均值/方差，可随 .to(device) 迁移、随 state_dict 持久化。
 
-    - feat 形状 [N,T,9]，输出统计量形状 [9]
+    - feat 形状 [N,T,12]，输出统计量形状 [12]（P_raw[0:3], V_raw[3:6], R_obs[6:9], residual[9:12]）
     - error = p_raw - p_true 形状 [N,T,3]，输出统计量形状 [3]
 
     设计目的：xLSTM 是带指数门控的自回归网络，直接吃未归一化的物理绝对值会数值崩塌。
@@ -630,7 +658,7 @@ class PI_xLSTM_Tracker(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 9,
+        input_dim: int = 12,
         hidden_dim: int = 64,
         output_dim: int = 3,
         seq_len: int = 16384,
@@ -1839,7 +1867,9 @@ def main() -> None:
             raise ValueError(
                 f"Feat_All must be [N,T,6|9|12], got {feat_nt9.shape}"
             )
-        _, seq_len_raw, input_dim_f = feat_nt9.shape
+        _, seq_len_raw, raw_f = feat_nt9.shape
+        # 当 .mat 包含 R_obs 时，有效输入维为 12（RCM 斜距 + 导航残差拼接）
+        input_dim_f = 12 if "R_obs" in f else raw_f
     # 自动 stride：T > 2048 且用户未显式设置时，自动降为 2 避免 mLSTM OOM
     # （mLSTM C 矩阵 [B,NH,S,S] 在 S=4096 时单次需要 B×4×4096²×2B = B×1GiB 显存）
     if seq_stride == 1 and seq_len_raw > 2048:
