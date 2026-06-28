@@ -55,7 +55,7 @@ function test_v4_phase_mat(mat_path, opts)
     if isfield(S, 'fc')
         fc = double(S.fc(1));
     else
-        fc = 9.5e9;
+        fc = 9.6e9;
     end
     c = 3e8;
     ref_names = {'A', 'B', 'C'};
