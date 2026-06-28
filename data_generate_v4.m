@@ -26,7 +26,7 @@ PRF = 500;
 dt  = 1 / PRF;
 
 %% 2. 雷达参数
-radar.fc = 9.5e9;
+radar.fc = 9.6e9;
 radar.c  = 3e8;
 fc = single(radar.fc);
 
@@ -36,6 +36,7 @@ P_true_all   = zeros(num_samples, Ny, 3, 'single');
 P_raw_all    = zeros(num_samples, Ny, 3, 'single');
 Phase_rel_all = zeros(num_samples, Ny, 3, 'single');
 R_ref_all    = zeros(num_samples, 3, 'single');
+R_obs_all    = zeros(num_samples, Ny, 3, 'single');
 Pos_A_all    = zeros(3, num_samples, 'single');
 Pos_B_all    = zeros(3, num_samples, 'single');
 Pos_C_all    = zeros(3, num_samples, 'single');
@@ -75,7 +76,7 @@ for iter = 1:num_samples
     Kd_yaw = 0.5 * (1 + 0.15*(2*rand()-1));
 
     v_target = 7 + 6*rand();
-    H_target = 60 + 80*rand();
+    H_target = 280 + 40*rand();          % 280~320 m
     H_target_all(iter) = H_target;
     V_target_all(iter) = v_target;
 
@@ -84,55 +85,17 @@ for iter = 1:num_samples
     Y_des = zeros(1, Ny);
     Z_des = H_target * ones(1, Ny);
 
-    %% --- B. 参考点 ---
+    %% --- B. 参考点（固定三点布局，场景 100m×100m） ---
     total_x = v_target * (Ny-1) * dt;
-    gen_pos = @() single([350 + 40*rand(); total_x*(0.1 + 0.8*rand()); Z_max*rand()]);
+    d_center = 954;                         % 地面距 ≈ sqrt(1000²-300²)
 
-    Pos_A = gen_pos();
-    Pos_B = gen_pos();
-    Pos_C = gen_pos();
+    Pos_A = single([d_center + 0;   total_x * 0.5 + 0;   0]);  % 中心,  R≈1000m
+    Pos_B = single([d_center + 40;  total_x * 0.5 + 40;  0]);  % 远边, +40m Y, +40m X
+    Pos_C = single([d_center - 40;  total_x * 0.5 - 40;  0]);  % 近边, -40m Y, -40m X
 
-    geom_ok = false;
-    resample_count = 0;
-    min_height = 0;
-    min_angle_deg = 0;
-    while ~geom_ok
-        AB = norm(Pos_A(1:2) - Pos_B(1:2));
-        BC = norm(Pos_B(1:2) - Pos_C(1:2));
-        CA = norm(Pos_A(1:2) - Pos_C(1:2));
-        dy_AB = abs(Pos_A(1) - Pos_B(1));
-        dy_BC = abs(Pos_B(1) - Pos_C(1));
-        dy_CA = abs(Pos_C(1) - Pos_A(1));
-        if AB < 5 || BC < 5 || CA < 5 || dy_AB < 2 || dy_BC < 2 || dy_CA < 2
-            Pos_A = gen_pos(); Pos_C = gen_pos();
-            resample_count = resample_count + 1;
-            continue;
-        end
-        v1 = Pos_B(1:2) - Pos_A(1:2);
-        v2 = Pos_C(1:2) - Pos_A(1:2);
-        tri_area = 0.5 * abs(v1(1)*v2(2) - v1(2)*v2(1));
-        max_edge = max([AB, BC, CA]);
-        min_height = 2 * tri_area / max_edge;
-        cos_A = (AB^2 + CA^2 - BC^2) / (2*AB*CA);
-        cos_B = (AB^2 + BC^2 - CA^2) / (2*AB*BC);
-        cos_C = (BC^2 + CA^2 - AB^2) / (2*BC*CA);
-        min_angle_deg = min([acosd(cos_A), acosd(cos_B), acosd(cos_C)]);
-        if min_height < 5 || min_angle_deg < 10
-            Pos_A = gen_pos(); Pos_C = gen_pos();
-            resample_count = resample_count + 1;
-            continue;
-        end
-        geom_ok = true;
-    end
-    temp_pts = [Pos_A, Pos_B, Pos_C];
-    temp_pts = temp_pts(:, randperm(3));
-    Pos_A = temp_pts(:, 1);
-    Pos_B = temp_pts(:, 2);
-    Pos_C = temp_pts(:, 3);
-
-    ref_min_height_all(iter) = min_height;
-    ref_min_angle_all(iter)  = min_angle_deg;
-    ref_resample_all(iter)   = resample_count;
+    ref_min_height_all(iter) = 40;
+    ref_min_angle_all(iter)  = 45;
+    ref_resample_all(iter)   = 0;
 
     %% --- C. 6-DOF -> p_true ---
     wind_amp  = rand(3,1) * 1.5;
@@ -222,6 +185,22 @@ for iter = 1:num_samples
     E_total = E_trend + E_rw + E_sine + E_white;
     p_raw = single(p_true + E_total);
 
+    %% --- D2. GPS 中断段仿真（IMU-only，位置漂移但速度短期可靠） ---
+    if rand() < 0.10
+        n_outages = randi([1, 3]);
+        for oi = 1:n_outages
+            o_start = randi([round(Ny*0.2), round(Ny*0.7)]);
+            o_len   = randi([256, 5120]);
+            o_end   = min(o_start + o_len, Ny);
+            drift_rate = 0.01 + 0.04*rand();
+            t_out = (0:(o_end - o_start)) * dt;
+            drift = drift_rate * [cumsum(randn(1, length(t_out))) * sqrt(dt);
+                                  cumsum(randn(1, length(t_out))) * sqrt(dt);
+                                  0.3 * cumsum(randn(1, length(t_out))) * sqrt(dt)];
+            p_raw(:, o_start:o_end) = p_raw(:, o_start:o_end) + drift;
+        end
+    end
+
     %% --- E. feat 1~6 ---
     feat = zeros(Ny, 6, 'single');
     window_size = 20;
@@ -252,10 +231,11 @@ for iter = 1:num_samples
 
     targets = single([Pos_A, Pos_B, Pos_C]);
 
-    %% --- F. P_true 相对相位 + R_ref ---
-    [phase_rel, r_ref] = compute_phase_rel_rref(p_true, targets, radar);
+    %% --- F. P_true 相对相位 + R_obs RCM ---
+    [phase_rel, r_ref, R_obs] = compute_phase_rel_rref(p_true, targets, radar);
     Phase_rel_all(iter, :, :) = phase_rel;
     R_ref_all(iter, :) = r_ref;
+    R_obs_all(iter, :, :) = R_obs;
 
     Feat_All(iter, :, :)  = feat;
     P_raw_all(iter, :, :)  = p_raw';
@@ -273,6 +253,7 @@ P_true = P_true_all;
 P_raw = P_raw_all;
 Phase_rel = Phase_rel_all;
 R_ref = R_ref_all;
+R_obs = R_obs_all;
 Pos_A = Pos_A_all;
 Pos_B = Pos_B_all;
 Pos_C = Pos_C_all;
@@ -289,6 +270,7 @@ v4_meta = struct( ...
 save(save_name, ...
     'Feat_All', 'P_raw', 'P_true', ...
     'Phase_rel', 'R_ref', ...
+    'R_obs', ...
     'Pos_A', 'Pos_B', 'Pos_C', 'fc', ...
     'v4_meta', ...
     '-v7.3');
@@ -302,23 +284,56 @@ disp(['[v4_phase] 训练集: ', save_name]);
 disp(['[v4_phase] 飞行参数: ', flight_path]);
 
 %% ========================================================================
-function [phase_rel_nt3, r_ref_13] = compute_phase_rel_rref(p, targets, radar)
+function [phase_rel_nt3, r_ref_13, R_obs_nt3] = compute_phase_rel_rref(p, targets, radar)
 % p: 3×Ny, targets: 3×3
-%   R_ref(j) = min_t ||p(:,t)-Pos_j||
-%   phase_rel(:,j) = unwrap(-4*pi*fc*(R-R_ref)/c)
+%   返回: 相对相位 (Ny×3), R_ref (1×3), 含测量噪声的 R_obs (Ny×3)
     Ny = size(p, 2);
     fc = double(radar.fc);
-    c = double(radar.c);
+    c  = double(radar.c);
+    dr = c / (2 * 200e6);       % 距离分辨率 ≈0.75m (B≈200MHz)
 
     phase_rel_nt3 = zeros(Ny, 3, 'single');
     r_ref_13 = zeros(1, 3, 'single');
+    R_obs_nt3 = zeros(Ny, 3, 'single');
 
     for j = 1:3
         p_tgt = targets(:, j);
-        R_slant = vecnorm(p - p_tgt, 2, 1).';
-        r_ref_j = min(R_slant);
+        R_slant = vecnorm(p - p_tgt, 2, 1).';          % 几何斜距
+
+        % ── RCM 测量仿真（从几何→测量）───────────────
+        % 1. 多点散射叠加（模拟相干斑）
+        scatter_amp = 0.1 * randn(3, 1);
+        scatter_dr  = dr * (rand(3, 1) - 0.5);
+        R_equiv = R_slant + sum(scatter_amp .* scatter_dr) / (sum(abs(scatter_amp)) + eps);
+
+        % 2. 多径效应（5% 概率）
+        if rand() < 0.05
+            mp_delay = dr * (0.5 + 1.5 * rand());
+            mp_amp   = 0.05 + 0.1 * rand();
+            R_equiv = R_equiv + mp_amp * mp_delay;
+        end
+
+        % 3. 距离向采样抖动（±0.1 距离单元）
+        R_jitter = R_equiv + dr * 0.2 * (rand() - 0.5);
+
+        % 4. 随机野值（2% 概率，±2 距离单元）
+        R_outlier = R_jitter;
+        outlier_mask = rand(Ny, 1) < 0.02;
+        R_outlier(outlier_mask) = R_jitter(outlier_mask) + dr * 4 * (rand(sum(outlier_mask), 1) - 0.5);
+
+        % 5. 阴影效应（低掠射角时 SNR 退化）
+        if abs(p(3, 1) - p_tgt(3)) / mean(R_slant) < 0.15
+            shadow_scale = 3.0;
+        else
+            shadow_scale = 1.0;
+        end
+        R_obs = R_outlier + shadow_scale * 0.003 * randn(size(R_outlier));   % 3mm 基础噪声
+        % ── 测量仿真结束 ─────────────────────────────
+
+        r_ref_j = min(R_obs);
         r_ref_13(j) = single(r_ref_j);
-        phase = -4.0 * pi * fc * (double(R_slant) - r_ref_j) / c;
+        phase = -4.0 * pi * fc * (double(R_obs) - r_ref_j) / c;
         phase_rel_nt3(:, j) = single(unwrap(phase));
+        R_obs_nt3(:, j) = single(R_obs);
     end
 end
